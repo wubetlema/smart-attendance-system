@@ -1,0 +1,26 @@
+# Dependencies
+vendor/
+composer.lock
+
+# Database credentials
+config/db.php
+
+# Uploaded files (user photos, documents)
+assets/uploads/
+
+# Backup files
+admin/backups/
+
+# Environment / sensitive
+*.env
+*.log
+*.sql.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

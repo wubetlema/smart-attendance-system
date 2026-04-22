@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offline - SmartAttend</title>
+    <link rel="stylesheet" href="/attendance-system/assets/style.css">
+</head>
+
+<body class="auth-page">
+    <div class="auth-card" style="text-align:center">
+        <div style="font-size:4rem;margin-bottom:1rem">📡</div>
+        <h2>You're Offline</h2>
+        <p class="subtitle">No internet connection detected.</p>
+        <p style="margin:1rem 0;color:var(--text-muted)">
+            Any attendance you mark will be saved locally and automatically synced when you're back online.
+        </p>
+        <button onclick="window.location.reload()" class="btn btn-primary btn-full">Try Again</button>
+        <div id="offlineQueue" style="margin-top:1.5rem"></div>
+    </div>
+    <script>
+        // Show pending offline records
+        async function showQueue() {
+            const req = indexedDB.open('smartattend', 1);
+            req.onsuccess = e => {
+                const db = e.target.result;
+                const tx = db.transaction('pending', 'readonly');
+                tx.objectStore('pending').getAll().onsuccess = ev => {
+                    const records = ev.target.result;
+                    if (records.length > 0) {
+                        document.getElementById('offlineQueue').innerHTML =
+                            '<div class="alert alert-info">' + records.length + ' attendance record(s) pending sync.</div>';
+                    }
+                };
+            };
+        }
+        showQueue();
+    </script>
+</body>
+
+</html>
