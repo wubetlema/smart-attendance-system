@@ -16,14 +16,18 @@ use PHPMailer\PHPMailer\Exception;
  * @return array ['success' => bool, 'message' => string]
  */
 function sendMail($toEmail, $toName, $subject, $body) {
-    $host    = getSetting('smtp_host', '');
-    $user    = getSetting('smtp_user', '');
-    $pass    = getSetting('smtp_pass', '');
-    $port    = (int) getSetting('smtp_port', 587);
-    $enabled = getSetting('email_notifications', '0');
+    $host     = getSetting('smtp_host', '');
+    $user     = getSetting('smtp_user', '');
+    $pass     = getSetting('smtp_pass', '');
+    $port     = (int) getSetting('smtp_port', '587');
+    $fromName = getSetting('smtp_from_name', 'SmartAttend');
+    $enabled  = getSetting('email_notifications', '0');
 
-    if (!$enabled || !$host || !$user) {
-        return ['success' => false, 'message' => 'Email notifications are disabled or SMTP not configured.'];
+    if ($enabled !== '1') {
+        return ['success' => false, 'message' => 'Email notifications are disabled in settings.'];
+    }
+    if (!$host || !$user || !$pass) {
+        return ['success' => false, 'message' => 'SMTP not fully configured. Set smtp_host, smtp_user, smtp_pass in Admin → Settings → Email/SMTP.'];
     }
 
     $mail = new PHPMailer(true);
@@ -35,8 +39,9 @@ function sendMail($toEmail, $toName, $subject, $body) {
         $mail->Password   = $pass;
         $mail->SMTPSecure = $port === 465 ? PHPMailer::ENCRYPTION_SMTPS : PHPMailer::ENCRYPTION_STARTTLS;
         $mail->Port       = $port;
+        $mail->Timeout    = 10;
 
-        $mail->setFrom($user, 'SmartAttend System');
+        $mail->setFrom($user, $fromName);
         $mail->addAddress($toEmail, $toName);
         $mail->isHTML(true);
         $mail->Subject = $subject;
@@ -46,6 +51,7 @@ function sendMail($toEmail, $toName, $subject, $body) {
         $mail->send();
         return ['success' => true, 'message' => 'Email sent.'];
     } catch (Exception $e) {
+        error_log("SmartAttend mailer error: " . $mail->ErrorInfo);
         return ['success' => false, 'message' => 'Mail error: ' . $mail->ErrorInfo];
     }
 }

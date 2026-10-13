@@ -4,6 +4,7 @@ composer.lock
 
 # Database credentials
 config/db.php
+config/.installed
 
 # Uploaded files (user photos, documents)
 assets/uploads/

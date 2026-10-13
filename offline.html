@@ -1,41 +1,226 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Offline - SmartAttend</title>
+    <title>Offline — SmartAttend</title>
     <link rel="stylesheet" href="/attendance-system/assets/style.css">
 </head>
 
-<body class="auth-page">
-    <div class="auth-card" style="text-align:center">
-        <div style="font-size:4rem;margin-bottom:1rem">📡</div>
-        <h2>You're Offline</h2>
-        <p class="subtitle">No internet connection detected.</p>
-        <p style="margin:1rem 0;color:var(--text-muted)">
-            Any attendance you mark will be saved locally and automatically synced when you're back online.
-        </p>
-        <button onclick="window.location.reload()" class="btn btn-primary btn-full">Try Again</button>
-        <div id="offlineQueue" style="margin-top:1.5rem"></div>
+<body>
+    <nav class="navbar">
+        <a href="/attendance-system/" class="nav-brand">📋 SmartAttend</a>
+        <div style="display:flex;align-items:center;gap:.5rem">
+            <span
+                style="background:#fef3c7;color:#b45309;padding:.3rem .7rem;border-radius:20px;font-size:.8rem;font-weight:600">⚠️
+                Offline</span>
+            <button class="dark-toggle" id="darkToggle" aria-label="Toggle dark mode">🌙</button>
+        </div>
+    </nav>
+
+    <div class="container" id="main-content">
+
+        <!-- Status Banner -->
+        <div
+            style="background:#fef3c7;border:1px solid #fcd34d;border-radius:10px;padding:1rem 1.5rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
+            <div style="font-size:2rem">📡</div>
+            <div style="flex:1">
+                <strong>You're offline</strong>
+                <p style="margin:.2rem 0 0;color:var(--text-muted);font-size:.9rem">Showing cached data. Any attendance
+                    marked will sync automatically when reconnected.</p>
+            </div>
+            <button onclick="window.location.reload()" class="btn btn-primary btn-sm">🔄 Retry</button>
+        </div>
+
+        <!-- Pending Queue -->
+        <div class="card" id="queueCard" style="display:none">
+            <h3>📤 Pending Sync Queue</h3>
+            <div id="queueList"></div>
+        </div>
+
+        <!-- Cached Schedule -->
+        <div class="card" id="scheduleCard" style="display:none">
+            <h3>📅 Your Schedule (Cached)</h3>
+            <div id="scheduleContent"></div>
+        </div>
+
+        <!-- Cached Classes -->
+        <div class="card" id="classesCard" style="display:none">
+            <h3>📚 Your Classes (Cached)</h3>
+            <div id="classesContent"></div>
+        </div>
+
+        <!-- Cached Attendance Summary -->
+        <div class="card" id="attendanceCard" style="display:none">
+            <h3>📊 Attendance Summary (Cached)</h3>
+            <div id="attendanceContent"></div>
+        </div>
+
+        <!-- Cached Calendar -->
+        <div class="card" id="calendarCard" style="display:none">
+            <h3>🗓️ Upcoming Events (Cached)</h3>
+            <div id="calendarContent"></div>
+        </div>
+
+        <!-- No cache fallback -->
+        <div class="card" id="noCacheCard">
+            <div style="text-align:center;padding:2rem">
+                <div style="font-size:3rem;margin-bottom:1rem">📭</div>
+                <h3>No cached data available</h3>
+                <p class="text-muted">Connect to the internet at least once to cache your data for offline use.</p>
+            </div>
+        </div>
+
     </div>
+
     <script>
-        // Show pending offline records
-        async function showQueue() {
-            const req = indexedDB.open('smartattend', 1);
+        // Dark mode
+        const darkToggle = document.getElementById('darkToggle');
+        const html = document.documentElement;
+        const saved = localStorage.getItem('theme') || 'light';
+        html.setAttribute('data-theme', saved);
+        darkToggle.textContent = saved === 'dark' ? '☀️' : '🌙';
+        darkToggle.addEventListener('click', () => {
+            const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+            html.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+            darkToggle.textContent = next === 'dark' ? '☀️' : '🌙';
+        });
+
+        // Days of week order
+        const DAY_ORDER = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+        async function loadOfflineData() {
+            const req = indexedDB.open('smartattend', 2);
             req.onsuccess = e => {
                 const db = e.target.result;
-                const tx = db.transaction('pending', 'readonly');
-                tx.objectStore('pending').getAll().onsuccess = ev => {
-                    const records = ev.target.result;
-                    if (records.length > 0) {
-                        document.getElementById('offlineQueue').innerHTML =
-                            '<div class="alert alert-info">' + records.length + ' attendance record(s) pending sync.</div>';
+                loadQueue(db);
+                loadCachedPayload(db);
+            };
+        }
+
+        function loadQueue(db) {
+            const tx = db.transaction('pending', 'readonly');
+            tx.objectStore('pending').getAll().onsuccess = ev => {
+                const records = ev.target.result.filter(r => r.type !== 'conflict');
+                if (records.length === 0) return;
+                document.getElementById('queueCard').style.display = 'block';
+                document.getElementById('noCacheCard').style.display = 'none';
+                document.getElementById('queueList').innerHTML =
+                    `<p class="text-muted">${records.length} attendance record(s) will sync when you reconnect.</p>
+             <table class="table"><thead><tr><th>Token</th><th>Queued At</th></tr></thead><tbody>` +
+                    records.map(r => `<tr><td><code>${r.token?.slice(0, 12) ?? '-'}...</code></td><td>${new Date(r.queued_at).toLocaleString()}</td></tr>`).join('') +
+                    '</tbody></table>';
+            };
+        }
+
+        function loadCachedPayload(db) {
+            const tx = db.transaction('offline_data', 'readonly');
+            tx.objectStore('offline_data').get('offline_payload').onsuccess = ev => {
+                const payload = ev.target.result?.value;
+                if (!payload) return;
+
+                document.getElementById('noCacheCard').style.display = 'none';
+
+                // Schedule
+                if (payload.data?.schedule?.length) {
+                    document.getElementById('scheduleCard').style.display = 'block';
+                    const byDay = {};
+                    payload.data.schedule.forEach(s => {
+                        if (!byDay[s.day_of_week]) byDay[s.day_of_week] = [];
+                        byDay[s.day_of_week].push(s);
+                    });
+                    let html = '<div style="display:grid;gap:.75rem">';
+                    DAY_ORDER.forEach(day => {
+                        if (!byDay[day]) return;
+                        html += `<div><strong style="color:var(--primary)">${day}</strong><div style="margin-top:.4rem;display:grid;gap:.4rem">`;
+                        byDay[day].forEach(s => {
+                            html += `<div style="padding:.5rem .75rem;background:var(--hover-bg);border-radius:8px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:.5rem">
+                        <span><strong>${s.class_name}</strong> <small class="text-muted">${s.subject ?? ''}</small></span>
+                        <span class="text-muted" style="font-size:.85rem">${s.start_time?.slice(0, 5) ?? ''} – ${s.end_time?.slice(0, 5) ?? ''} ${s.room_name ? '| ' + s.room_name : ''}</span>
+                    </div>`;
+                        });
+                        html += '</div></div>';
+                    });
+                    html += '</div>';
+                    document.getElementById('scheduleContent').innerHTML = html;
+                }
+
+                // Classes
+                if (payload.data?.classes?.length) {
+                    document.getElementById('classesCard').style.display = 'block';
+                    let html = '<table class="table"><thead><tr><th>Class</th><th>Subject</th><th>Teacher</th><th>Room</th>';
+                    if (payload.role === 'teacher') html += '<th>Students</th>';
+                    html += '</tr></thead><tbody>';
+                    payload.data.classes.forEach(c => {
+                        html += `<tr>
+                    <td><strong>${c.name}</strong>${c.course_code ? ' <code>' + c.course_code + '</code>' : ''}</td>
+                    <td>${c.subject ?? '-'}</td>
+                    <td>${c.teacher_name ?? '-'}</td>
+                    <td>${c.room_name ? c.room_name + (c.building ? ', ' + c.building : '') : '-'}</td>`;
+                        if (payload.role === 'teacher') html += `<td>${c.student_count ?? 0}</td>`;
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table>';
+                    document.getElementById('classesContent').innerHTML = html;
+                }
+
+                // Attendance summary (student)
+                if (payload.data?.attendance_summary) {
+                    document.getElementById('attendanceCard').style.display = 'block';
+                    const s = payload.data.attendance_summary;
+                    const pct = s.total > 0 ? Math.round((s.present / s.total) * 100) : 0;
+                    document.getElementById('attendanceContent').innerHTML = `
+                <div class="stats-grid" style="grid-template-columns:repeat(4,1fr)">
+                    <div class="stat-card"><div class="stat-number">${s.total}</div><div class="stat-label">Total</div></div>
+                    <div class="stat-card" style="border-color:#16a34a"><div class="stat-number" style="color:#16a34a">${s.present}</div><div class="stat-label">Present</div></div>
+                    <div class="stat-card" style="border-color:#dc2626"><div class="stat-number" style="color:#dc2626">${s.absent}</div><div class="stat-label">Absent</div></div>
+                    <div class="stat-card" style="border-color:#d97706"><div class="stat-number" style="color:#d97706">${s.late}</div><div class="stat-label">Late</div></div>
+                </div>
+                <div class="progress-bar-wrap" style="margin-top:1rem">
+                    <div class="progress-bar" style="width:${pct}%">${pct}%</div>
+                </div>`;
+                }
+
+                // Calendar
+                if (payload.data?.calendar?.length) {
+                    document.getElementById('calendarCard').style.display = 'block';
+                    const typeColors = { holiday: '#fee2e2', exam: '#fef3c7', registration: '#dbeafe', orientation: '#dcfce7', break: '#fce7f3', deadline: '#fed7aa', other: '#f1f5f9' };
+                    let html = '<div style="display:grid;gap:.5rem">';
+                    payload.data.calendar.forEach(ev => {
+                        const bg = typeColors[ev.event_type] || typeColors.other;
+                        html += `<div style="padding:.5rem .75rem;background:${bg};border-radius:8px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:.5rem">
+                    <span><strong>${ev.title}</strong> ${ev.affects_attendance ? '<span style="font-size:.75rem;background:#fef3c7;color:#b45309;padding:1px 6px;border-radius:4px">No Classes</span>' : ''}</span>
+                    <span class="text-muted" style="font-size:.85rem">${ev.event_date}${ev.end_date && ev.end_date !== ev.event_date ? ' – ' + ev.end_date : ''}</span>
+                </div>`;
+                    });
+                    html += '</div>';
+                    document.getElementById('calendarContent').innerHTML = html;
+                }
+
+                // Show last sync time
+                const tx2 = db.transaction('offline_data', 'readonly');
+                tx2.objectStore('offline_data').get('last_sync').onsuccess = ev2 => {
+                    const ts = ev2.target.result?.value;
+                    if (ts) {
+                        const banner = document.querySelector('[style*="fef3c7"]');
+                        if (banner) {
+                            const p = banner.querySelector('p');
+                            if (p) p.textContent += ` Last cached: ${new Date(ts).toLocaleString()}.`;
+                        }
                     }
                 };
             };
         }
-        showQueue();
+
+        loadOfflineData();
+
+        // Auto-retry when back online
+        window.addEventListener('online', () => {
+            document.querySelector('.btn-primary').textContent = '✅ Back online! Reloading...';
+            setTimeout(() => window.location.href = '/attendance-system/', 1000);
+        });
     </script>
 </body>
 

@@ -18,7 +18,7 @@ function createSession($class_id, $teacher_id, $method = 'qr', $minutes = 15) {
 function markAttendance($session_id, $student_id, $status = 'present', $method = 'qr') {
     global $conn;
     // Check session is still valid
-    $stmt = $conn->prepare("SELECT s.id, c.name AS class_name, c.subject FROM attendance_sessions s JOIN classes c ON s.class_id=c.id WHERE s.id=? AND s.expires_at > NOW()");
+    $stmt = $conn->prepare("SELECT s.id, s.class_id, c.name AS class_name, c.subject FROM attendance_sessions s JOIN classes c ON s.class_id=c.id WHERE s.id=? AND s.expires_at > NOW()");
     $stmt->bind_param('i', $session_id);
     $stmt->execute();
     $session = $stmt->get_result()->fetch_assoc();
@@ -38,6 +38,12 @@ function markAttendance($session_id, $student_id, $status = 'present', $method =
             require_once __DIR__ . '/mailer.php';
             notifyAttendance($student['email'], $student['name'], $session['class_name'], $status, date('d M Y'));
         }
+
+        // ── AUTO-TRIGGER ALERT ENGINE ────────────────────────────────────────
+        // Check if this student now triggers any alert rules
+        require_once __DIR__ . '/alert_engine.php';
+        checkStudentAlerts($student_id, $session['class_id']);
+
         return ['success' => true, 'message' => 'Attendance marked'];
     }
     return ['success' => false, 'message' => 'Already marked'];

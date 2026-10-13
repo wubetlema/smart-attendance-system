@@ -9,7 +9,11 @@ CREATE TABLE users (
     password VARCHAR(255) NOT NULL,
     role ENUM('admin', 'teacher', 'student') NOT NULL,
     university_id VARCHAR(30) UNIQUE NULL COMMENT 'e.g. WU/URR/1234/15',
+    email VARCHAR(100) DEFAULT '',
+    phone VARCHAR(20) DEFAULT '',
     face_descriptor TEXT NULL,
+    is_first_login TINYINT(1) DEFAULT 1 COMMENT 'Force password change on first login',
+    is_active TINYINT(1) DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -38,10 +42,33 @@ CREATE TABLE attendance_sessions (
     teacher_id INT NOT NULL,
     qr_token VARCHAR(64) UNIQUE NOT NULL,
     method ENUM('manual', 'qr', 'face') DEFAULT 'manual',
-    expires_at DATETIME NOT NULL,
+    -- State machine
+    status ENUM('scheduled','not_started','open','late','closed') DEFAULT 'not_started',
+    -- Time windows
+    open_at DATETIME NOT NULL COMMENT 'When attendance window opens (students can scan)',
+    present_until DATETIME NOT NULL COMMENT 'After this time students are marked late',
+    late_until DATETIME NOT NULL COMMENT 'After this time session is closed, no check-in allowed',
+    expires_at DATETIME NOT NULL COMMENT 'Legacy: same as late_until for backward compat',
+    -- Auto-session flag
+    auto_created TINYINT(1) DEFAULT 0 COMMENT 'Created automatically from timetable',
+    schedule_id INT NULL COMMENT 'Source timetable schedule',
+    room VARCHAR(100) DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
     FOREIGN KEY (teacher_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE dynamic_qr_tokens (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id INT NOT NULL,
+    token VARCHAR(128) NOT NULL UNIQUE,
+    valid_from DATETIME NOT NULL,
+    valid_until DATETIME NOT NULL,
+    is_used TINYINT(1) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+    INDEX idx_session_valid (session_id, valid_until),
+    INDEX idx_token (token)
 );
 
 CREATE TABLE attendance (
@@ -56,6 +83,5 @@ CREATE TABLE attendance (
     UNIQUE KEY unique_attendance (session_id, student_id)
 );
 
--- Default admin account (password: password)
-INSERT INTO users (name, university_id, password, role) VALUES
-('Administrator', 'WU/ADMIN/0001/00', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'admin');
+-- ⚠️ SECURITY: No default admin account in production schema
+-- Run install.php on first deployment to create admin account securely

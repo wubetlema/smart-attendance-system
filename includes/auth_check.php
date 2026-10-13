@@ -1,10 +1,21 @@
 <?php
 if (session_status() === PHP_SESSION_NONE) session_start();
 
+// Always ensure DB is available before any auth checks run
+// (session_manager.php needs $conn; it may be called before the page loads db.php)
+if (!isset($conn)) {
+    require_once __DIR__ . '/../config/db.php';
+}
+
 function requireLogin() {
     if (!isset($_SESSION['user_id'])) {
         header('Location: /attendance-system/auth/login.php');
         exit;
+    }
+    // Check for force-logout on every protected request
+    if (!defined('SKIP_SESSION_CHECK')) {
+        require_once __DIR__ . '/session_manager.php';
+        validateSession();
     }
 }
 

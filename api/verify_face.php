@@ -34,13 +34,24 @@ if (!$session_id) {
 }
 
 // Load stored face descriptor for this student
-$stmt = $conn->prepare("SELECT face_descriptor FROM users WHERE id=? AND role='student'");
+$stmt = $conn->prepare("SELECT face_descriptor, face_admin_approved, face_revoked FROM users WHERE id=? AND role='student'");
 $stmt->bind_param('i', $student_id);
 $stmt->execute();
 $row = $stmt->get_result()->fetch_assoc();
 
 if (!$row || !$row['face_descriptor']) {
     echo json_encode(['success' => false, 'message' => 'No registered face found. Please register your face first.']);
+    exit;
+}
+
+// Check admin approval and revocation
+if ($row['face_revoked']) {
+    echo json_encode(['success' => false, 'message' => 'Your face enrollment has been revoked by an administrator. Please contact your department.']);
+    exit;
+}
+
+if (!$row['face_admin_approved']) {
+    echo json_encode(['success' => false, 'message' => 'Your face enrollment is pending admin approval. Please use QR check-in in the meantime.']);
     exit;
 }
 
