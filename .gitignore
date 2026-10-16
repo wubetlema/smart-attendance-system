@@ -8,6 +8,10 @@ config/.installed
 
 # Uploaded files (user photos, documents)
 assets/uploads/
+secure_uploads/
+
+# Logs
+logs/
 
 # Backup files
 admin/backups/

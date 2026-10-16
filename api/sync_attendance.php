@@ -34,6 +34,7 @@ if (empty($records)) {
 }
 
 $results = [];
+$seenTokens = []; // Deduplicate within the batch itself
 
 foreach ($records as $record) {
     $token     = $record['token'] ?? '';
@@ -44,6 +45,13 @@ foreach ($records as $record) {
         $results[] = ['token' => $token, 'success' => false, 'message' => 'Missing token'];
         continue;
     }
+
+    // Deduplicate within this batch — same token submitted twice in one sync
+    if (isset($seenTokens[$token])) {
+        $results[] = ['token' => $token, 'success' => false, 'message' => 'Duplicate token in batch — skipped.'];
+        continue;
+    }
+    $seenTokens[$token] = true;
 
     // Validate offline timestamp before anything else
     $tsCheck = validateOfflineTimestamp($offlineAt);
@@ -56,18 +64,35 @@ foreach ($records as $record) {
         continue;
     }
 
-    // Find session with 2hr grace window for offline records
-    $stmt = $conn->prepare("
-        SELECT id, class_id, expires_at
-        FROM attendance_sessions
-        WHERE qr_token = ?
-        AND expires_at > DATE_SUB(NOW(), INTERVAL 2 HOUR)
+    // Find session via static OR dynamic QR token with 2hr grace window
+    // Check dynamic tokens first (rotated every 30s)
+    $dynStmt = $conn->prepare("
+        SELECT t.session_id FROM dynamic_qr_tokens t
+        JOIN attendance_sessions s ON t.session_id = s.id
+        WHERE t.token = ?
+          AND t.valid_until > DATE_SUB(NOW(), INTERVAL 2 HOUR)
+        LIMIT 1
     ");
-    $stmt->bind_param('s', $token);
-    $stmt->execute();
-    $session = $stmt->get_result()->fetch_assoc();
+    $dynStmt->bind_param('s', $token);
+    $dynStmt->execute();
+    $dynRow = $dynStmt->get_result()->fetch_assoc();
 
-    if (!$session) {
+    $sessionId = $dynRow['session_id'] ?? null;
+
+    if (!$sessionId) {
+        // Fall back to static QR token
+        $stmt = $conn->prepare("
+            SELECT id FROM attendance_sessions
+            WHERE qr_token = ?
+              AND expires_at > DATE_SUB(NOW(), INTERVAL 2 HOUR)
+        ");
+        $stmt->bind_param('s', $token);
+        $stmt->execute();
+        $sessRow = $stmt->get_result()->fetch_assoc();
+        $sessionId = $sessRow['id'] ?? null;
+    }
+
+    if (!$sessionId) {
         $results[] = [
             'token'   => $token,
             'success' => false,
@@ -77,7 +102,7 @@ foreach ($records as $record) {
     }
 
     // Use priority-aware marking with timestamp validation
-    $result = markAttendanceWithPriority($session['id'], $student_id, $status, 'offline_sync', $offlineAt);
+    $result = markAttendanceWithPriority($sessionId, $student_id, $status, 'offline_sync', $offlineAt);
     $results[] = array_merge(['token' => $token], $result);
 }
 

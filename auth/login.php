@@ -34,9 +34,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!$user['is_active']) {
                 $error = 'Your account has been deactivated. Please contact the administrator.';
             } else {
-                $_SESSION['user_id']      = $user['id'];
-                $_SESSION['name']         = $user['name'];
-                $_SESSION['role']         = $user['role'];
+                // ── Regenerate session ID to prevent session fixation ──────
+                session_regenerate_id(true);
+
+                $_SESSION['user_id']        = $user['id'];
+                $_SESSION['name']           = $user['name'];
+                $_SESSION['role']           = $user['role'];
                 $_SESSION['is_first_login'] = (bool)$user['is_first_login'];
 
                 // Create session record & detect concurrent sessions

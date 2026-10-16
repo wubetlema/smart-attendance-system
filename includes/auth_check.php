@@ -2,10 +2,12 @@
 if (session_status() === PHP_SESSION_NONE) session_start();
 
 // Always ensure DB is available before any auth checks run
-// (session_manager.php needs $conn; it may be called before the page loads db.php)
 if (!isset($conn)) {
     require_once __DIR__ . '/../config/db.php';
 }
+
+// Apply security headers + error display config on every request
+require_once __DIR__ . '/security_headers.php';
 
 function requireLogin() {
     if (!isset($_SESSION['user_id'])) {

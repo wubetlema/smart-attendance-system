@@ -39,6 +39,7 @@ session_start();
 require_once '../config/db.php';
 require_once '../includes/auth_check.php';
 require_once '../includes/functions.php';
+require_once '../includes/face_crypto.php';
 
 header('Content-Type: application/json');
 header('X-Content-Type-Options: nosniff');
@@ -47,6 +48,12 @@ header('X-Content-Type-Options: nosniff');
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'student') {
     http_response_code(401);
     echo json_encode(['success' => false, 'message' => 'Unauthorized.']);
+    exit;
+}
+
+// Rate limit: max 10 save_face attempts per hour per IP
+if (!rateLimit('save_face', 10)) {
+    echo json_encode(['success' => false, 'message' => 'Too many requests. Please wait before trying again.']);
     exit;
 }
 
@@ -61,34 +68,12 @@ $maxPerHour   = max(1, (int)getSetting('face_max_registrations_per_hour', '3'));
 $encKey       = getSetting('face_encryption_key', '');
 $requireApproval = getSetting('face_require_admin_approval', '0') === '1';
 
-// ── Encryption helpers ─────────────────────────────────────────────────────────
+// ── Encryption helpers — use shared FaceCrypto service ────────────────────────
 function encryptDescriptor(array $descriptor, string $key): string {
-    if (empty($key)) {
-        // No key configured — store as JSON (degraded mode, warn in audit)
-        return json_encode($descriptor);
-    }
-    $iv         = random_bytes(16);
-    $keyBytes   = hash('sha256', $key, true); // 32 bytes for AES-256
-    $plaintext  = json_encode($descriptor);
-    $ciphertext = openssl_encrypt($plaintext, 'AES-256-CBC', $keyBytes, OPENSSL_RAW_DATA, $iv);
-    // Store as: base64(iv) . ':' . base64(ciphertext)
-    return base64_encode($iv) . ':' . base64_encode($ciphertext);
+    return FaceCrypto::encrypt($descriptor, $key);
 }
-
 function decryptDescriptor(string $stored, string $key): ?array {
-    // Legacy: plain JSON (no encryption)
-    if (str_starts_with(ltrim($stored), '[')) {
-        return json_decode($stored, true);
-    }
-    if (empty($key) || !str_contains($stored, ':')) {
-        return null;
-    }
-    [$ivB64, $ctB64] = explode(':', $stored, 2);
-    $iv         = base64_decode($ivB64);
-    $ciphertext = base64_decode($ctB64);
-    $keyBytes   = hash('sha256', $key, true);
-    $plaintext  = openssl_decrypt($ciphertext, 'AES-256-CBC', $keyBytes, OPENSSL_RAW_DATA, $iv);
-    return $plaintext !== false ? json_decode($plaintext, true) : null;
+    return FaceCrypto::decrypt($stored, $key);
 }
 
 // ── Rate limiting: max N registration attempts per hour ───────────────────────

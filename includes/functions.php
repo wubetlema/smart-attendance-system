@@ -205,9 +205,22 @@ function markAttendanceWithPriority($session_id, $student_id, $status = 'present
         }
     }
 
-    // 2. Check session validity (with 2hr grace for offline)
+    // 2. Validate inputs
+    if (!in_array($status, ['present','absent','late'])) {
+        return ['success' => false, 'message' => 'Invalid attendance status.'];
+    }
+    if (!in_array($method, ['manual','face','qr','offline_sync'])) {
+        return ['success' => false, 'message' => 'Invalid check-in method.'];
+    }
+
+    // 3. Check session validity (with 2hr grace for offline)
     $grace = ($method === 'offline_sync') ? "DATE_SUB(NOW(), INTERVAL 2 HOUR)" : "NOW()";
-    $stmt  = $conn->prepare("SELECT s.id, c.name AS class_name, c.subject FROM attendance_sessions s JOIN classes c ON s.class_id=c.id WHERE s.id=? AND s.expires_at > $grace");
+    $stmt  = $conn->prepare("
+        SELECT s.id, c.name AS class_name, c.subject
+        FROM attendance_sessions s
+        JOIN classes c ON s.class_id = c.id
+        WHERE s.id = ? AND s.expires_at > $grace
+    ");
     $stmt->bind_param('i', $session_id);
     $stmt->execute();
     $session = $stmt->get_result()->fetch_assoc();
@@ -216,61 +229,88 @@ function markAttendanceWithPriority($session_id, $student_id, $status = 'present
         return ['success' => false, 'message' => 'Session expired or invalid.'];
     }
 
-    // 3. Check if already marked
-    $check = $conn->prepare("SELECT id, method, status FROM attendance WHERE session_id=? AND student_id=?");
-    $check->bind_param('ii', $session_id, $student_id);
-    $check->execute();
-    $existing = $check->get_result()->fetch_assoc();
+    // 4. Wrap entire check-and-write in a transaction to eliminate TOCTOU race
+    $conn->begin_transaction();
 
-    if ($existing) {
-        // 4. Apply server priority rules
-        if (!canOverrideAttendance($existing['method'], $method)) {
-            $msg = $existing['method'] === 'manual'
-                ? "Already marked by teacher as '{$existing['status']}'. Teacher records take priority."
-                : "Already marked via {$existing['method']} as '{$existing['status']}'. Cannot override with $method.";
+    try {
+        // Lock the potential existing row with SELECT FOR UPDATE
+        $check = $conn->prepare("
+            SELECT id, method, status FROM attendance
+            WHERE session_id = ? AND student_id = ?
+            FOR UPDATE
+        ");
+        $check->bind_param('ii', $session_id, $student_id);
+        $check->execute();
+        $existing = $check->get_result()->fetch_assoc();
 
+        if ($existing) {
+            // Apply server priority rules
+            if (!canOverrideAttendance($existing['method'], $method)) {
+                $conn->rollback();
+                $msg = $existing['method'] === 'manual'
+                    ? "Already marked by teacher as '{$existing['status']}'. Teacher records take priority."
+                    : "Already marked via {$existing['method']} as '{$existing['status']}'. Cannot override with $method.";
+                return [
+                    'success'         => false,
+                    'conflict'        => true,
+                    'message'         => $msg,
+                    'existing_status' => $existing['status'],
+                    'existing_method' => $existing['method'],
+                ];
+            }
+
+            // Higher priority — update existing record
+            $editor = $markedBy ?? $_SESSION['user_id'] ?? null;
+            $upd = $conn->prepare("
+                UPDATE attendance
+                SET status=?, method=?, edited_by=?, edited_at=NOW(), original_status=?
+                WHERE id=?
+            ");
+            $upd->bind_param('ssisi', $status, $method, $editor, $existing['status'], $existing['id']);
+            $upd->execute();
+
+            $conn->commit();
+            logActivity('attendance_override', "Session: $session_id, Student: $student_id, Old: {$existing['method']}/{$existing['status']}, New: $method/$status", $markedBy);
             return [
-                'success'          => false,
-                'conflict'         => true,
-                'message'          => $msg,
-                'existing_status'  => $existing['status'],
-                'existing_method'  => $existing['method']
+                'success'  => true,
+                'override' => true,
+                'message'  => "Attendance updated from '{$existing['status']}' ({$existing['method']}) to '$status' ($method).",
             ];
         }
 
-        // Higher priority method — update the existing record
-        $editor = $markedBy ?? $_SESSION['user_id'] ?? null;
-        $upd = $conn->prepare("UPDATE attendance SET status=?, method=?, edited_by=?, edited_at=NOW(), original_status=? WHERE id=?");
-        $upd->bind_param('ssisi', $status, $method, $editor, $existing['status'], $existing['id']);
-        $upd->execute();
+        // No existing record — insert fresh
+        // Uses INSERT IGNORE so a DB-level UNIQUE constraint is the final safety net
+        $ins = $conn->prepare("
+            INSERT IGNORE INTO attendance (session_id, student_id, status, method)
+            VALUES (?,?,?,?)
+        ");
+        $ins->bind_param('iiss', $session_id, $student_id, $status, $method);
+        $ins->execute();
 
-        logActivity('attendance_override', "Session: $session_id, Student: $student_id, Old: {$existing['method']}/{$existing['status']}, New: $method/$status", $markedBy);
+        if ($conn->affected_rows === 0) {
+            // Race condition: another request inserted between our SELECT and INSERT
+            $conn->rollback();
+            return ['success' => false, 'conflict' => true, 'message' => 'Attendance already recorded (concurrent request).'];
+        }
 
-        return [
-            'success'  => true,
-            'override' => true,
-            'message'  => "Attendance updated from '{$existing['status']}' ({$existing['method']}) to '$status' ($method)."
-        ];
-    }
+        $conn->commit();
 
-    // 5. No existing record — insert fresh
-    $stmt = $conn->prepare("INSERT INTO attendance (session_id, student_id, status, method) VALUES (?,?,?,?)");
-    $stmt->bind_param('iiss', $session_id, $student_id, $status, $method);
-    $stmt->execute();
-
-    if ($conn->affected_rows > 0) {
-        // Email notification
+        // Post-insert: email notification + activity log (outside transaction — non-critical)
         $su = $conn->prepare("SELECT name, email FROM users WHERE id=?");
         $su->bind_param('i', $student_id);
         $su->execute();
         $student = $su->get_result()->fetch_assoc();
-        if ($student && $student['email']) {
+        if ($student && !empty($student['email'])) {
             require_once __DIR__ . '/mailer.php';
             notifyAttendance($student['email'], $student['name'], $session['class_name'], $status, date('d M Y'));
         }
         logActivity('attendance_marked', "Session: $session_id, Status: $status, Method: $method", $student_id);
-        return ['success' => true, 'message' => 'Attendance marked successfully.'];
-    }
 
-    return ['success' => false, 'message' => 'Failed to save attendance.'];
+        return ['success' => true, 'message' => 'Attendance marked successfully.'];
+
+    } catch (\Exception $e) {
+        $conn->rollback();
+        error_log('markAttendanceWithPriority error: ' . $e->getMessage());
+        return ['success' => false, 'message' => 'A database error occurred. Please try again.'];
+    }
 }

@@ -43,46 +43,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $msg = 'Request not found or already reviewed.'; $msgType = 'error';
     } else {
         if ($action === 'approve') {
-            // 1. Update attendance record
-            $upd = $conn->prepare("
-                UPDATE attendance
-                SET status=?, method='manual', edited_by=?, edited_at=NOW(), original_status=?
-                WHERE id=?
-            ");
-            $upd->bind_param('sissi', $req['requested_status'], $user['id'], $req['original_status'], $req['attendance_id']);
-            $upd->execute();
 
-            // 2. Mark correction as approved
-            $conn->prepare("
-                UPDATE attendance_corrections
-                SET status='approved', reviewed_by=?, reviewed_at=NOW(), reviewer_notes=?
-                WHERE id=?
-            ")->bind_param('isi', $user['id'], $notes, $corrId) && $conn->prepare("
-                UPDATE attendance_corrections
-                SET status='approved', reviewed_by=?, reviewed_at=NOW(), reviewer_notes=?
-                WHERE id=?
-            ")->execute();
-            $upd2 = $conn->prepare("UPDATE attendance_corrections SET status='approved', reviewed_by=?, reviewed_at=NOW(), reviewer_notes=? WHERE id=?");
-            $upd2->bind_param('isi', $user['id'], $notes, $corrId);
-            $upd2->execute();
+            // ── Use a transaction: update attendance + correction atomically ──
+            $conn->begin_transaction();
+            try {
+                // 1. Update attendance record (correct bind: 'sisi' = 4 params)
+                $upd = $conn->prepare("
+                    UPDATE attendance
+                    SET status=?, method='manual', edited_by=?, edited_at=NOW(), original_status=?
+                    WHERE id=?
+                ");
+                $upd->bind_param('sisi',
+                    $req['requested_status'],
+                    $user['id'],
+                    $req['original_status'],
+                    $req['attendance_id']
+                );
+                $upd->execute();
 
-            // 3. Audit
-            Audit::correctionApproved(
-                $corrId, $req['student_id'],
-                $req['original_status'], $req['requested_status'],
-                $user['id']
-            );
+                if ($conn->affected_rows < 0) {
+                    throw new \Exception('Failed to update attendance record.');
+                }
 
-            // 4. Email student
-            Notify::correctionStatusChanged(
-                $req['student_id'],
-                $req['class_name'],
-                'approved',
-                $notes,
-                $req['session_date']
-            );
+                // 2. Mark correction as approved (single update, not tripled)
+                $upd2 = $conn->prepare("
+                    UPDATE attendance_corrections
+                    SET status='approved', reviewed_by=?, reviewed_at=NOW(), reviewer_notes=?
+                    WHERE id=? AND status='pending'
+                ");
+                $upd2->bind_param('isi', $user['id'], $notes, $corrId);
+                $upd2->execute();
 
-            $msg = "Correction approved. {$req['student_name']}'s attendance updated to " . strtoupper($req['requested_status']) . ".";
+                if ($conn->affected_rows === 0) {
+                    // Another request already processed this — roll back
+                    throw new \Exception('Request already reviewed or not found.');
+                }
+
+                $conn->commit();
+
+                // 3. Audit + notify (outside transaction — non-critical)
+                Audit::correctionApproved(
+                    $corrId, $req['student_id'],
+                    $req['original_status'], $req['requested_status'],
+                    $user['id']
+                );
+                Notify::correctionStatusChanged(
+                    $req['student_id'],
+                    $req['class_name'],
+                    'approved',
+                    $notes,
+                    $req['session_date']
+                );
+
+                $msg = "Correction approved. {$req['student_name']}'s attendance updated to " . strtoupper($req['requested_status']) . ".";
+
+            } catch (\Exception $e) {
+                $conn->rollback();
+                $msg = 'Error: ' . $e->getMessage(); $msgType = 'error';
+            }
 
         } elseif ($action === 'reject') {
             if (empty($notes)) {
@@ -90,12 +108,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 goto render;
             }
 
-            $upd = $conn->prepare("UPDATE attendance_corrections SET status='rejected', reviewed_by=?, reviewed_at=NOW(), reviewer_notes=? WHERE id=?");
+            // Reject does not touch the attendance record — no transaction needed
+            $upd = $conn->prepare("
+                UPDATE attendance_corrections
+                SET status='rejected', reviewed_by=?, reviewed_at=NOW(), reviewer_notes=?
+                WHERE id=? AND status='pending'
+            ");
             $upd->bind_param('isi', $user['id'], $notes, $corrId);
             $upd->execute();
 
-            Audit::correctionRejected($corrId, $user['id'], $notes);
+            if ($conn->affected_rows === 0) {
+                $msg = 'Request already reviewed or not found.'; $msgType = 'error';
+                goto render;
+            }
 
+            Audit::correctionRejected($corrId, $user['id'], $notes);
             Notify::correctionStatusChanged(
                 $req['student_id'],
                 $req['class_name'],

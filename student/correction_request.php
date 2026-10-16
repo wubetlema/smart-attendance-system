@@ -11,6 +11,7 @@ require_once '../config/db.php';
 require_once '../includes/functions.php';
 require_once '../includes/audit.php';
 require_once '../includes/notification_engine.php';
+require_once '../includes/file_upload.php';
 
 $user = currentUser();
 $msg = ''; $msgType = 'success';
@@ -52,22 +53,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if ($exists->get_result()->num_rows > 0) {
                 $msg = 'A correction request is already pending for this record.'; $msgType = 'error';
             } else {
-                // Handle optional evidence file upload
+                // Handle optional evidence file upload using secure handler
+                $evidencePath = '';
                 if (!empty($_FILES['evidence']['name'])) {
-                    $ext = strtolower(pathinfo($_FILES['evidence']['name'], PATHINFO_EXTENSION));
-                    $allowed = ['jpg','jpeg','png','pdf'];
-                    if (in_array($ext, $allowed) && $_FILES['evidence']['size'] < 5 * 1024 * 1024) {
-                        $dir = '../assets/uploads/evidence/';
-                        if (!is_dir($dir)) mkdir($dir, 0755, true);
-                        $fname = 'corr_' . $user['id'] . '_' . time() . '.' . $ext;
-                        if (move_uploaded_file($_FILES['evidence']['tmp_name'], $dir . $fname)) {
-                            $evidencePath = $fname;
-                        }
+                    $upload = FileUpload::handle('evidence', 'evidence', $user['id']);
+                    if ($upload['success']) {
+                        $evidencePath = $upload['path'];
+                    } else {
+                        $msg = $upload['message']; $msgType = 'error';
+                        goto skipInsert;
                     }
                 }
 
-                $ins = $conn->prepare("
-                    INSERT INTO attendance_corrections
+                skipInsert:
+                $ins = $conn->prepare("                    INSERT INTO attendance_corrections
                         (attendance_id, session_id, student_id, class_id,
                          original_status, original_method, requested_status, reason, evidence_path)
                     VALUES (?,?,?,?,?,?,?,?,?)
